@@ -1,0 +1,39 @@
+scan:
+  concurrency: 5
+  timeout_seconds: 60
+  test_prompt: "A red circle on a white background"
+  test_resolution: "256x256"
+  retry_count: 1
+  skip_local: false
+
+search:
+  max_results_per_query: 10
+  search_queries:
+    - "free AI image generation API 2026"
+    - "free text to image API no credit card"
+    - "Stable Diffusion API free"
+    - "FLUX API free endpoint"
+    - "free image generation API DALL-E alternative"
+    - "AI art API free tier"
+
+discovery:
+  enabled: true
+  strategies:
+    - web_search
+    - github_search
+    - llm_search
+  llm_provider: groq
+  llm_model: llama-3.3-70b-versatile
+
+plugins:
+  enabled_plugins:
+    - benchmark
+    - model_list
+    - export
+
+report:
+  output_file: README.md
+
+proxy:
+  port: 8000
+  default_provider: huggingface

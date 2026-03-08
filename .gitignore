@@ -1,0 +1,48 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project
+data/*.json
+data/*.csv
+data/*.yaml
+data/*.html
+*.log
+debug.log
+
+# Generated images
+output/
+generated/
+*.png
+*.jpg
+*.jpeg
+*.webp
+!examples/*.png
