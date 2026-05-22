@@ -223,22 +223,20 @@ curl -X POST "https://api-inference.huggingface.co/models/black-forest-labs/FLUX
 ```text
 ai_image_generation/
 ├── __version__.py          # Version string
-├── config.py               # Configuration loader
+├── main.py                 # CLI entry point (12 subcommands)
+├── providers.py            # Provider dataclass + 41-provider registry
+├── scanner.py              # Async endpoint health scanner (with retries)
+├── pricing.py              # Static per-image pricing table
+├── model_listing.py        # Live model fetcher via /v1/models
+├── discovery.py            # Candidate-host prober for new providers
+├── proxy.py                # OpenAI-compatible local proxy with fallback
+├── config.py               # YAML + .env configuration loader
 ├── config.yaml             # Default configuration
-├── providers.py            # Provider dataclass & registry
-├── scanner.py              # Endpoint health scanner
 ├── report_generator.py     # This file – README generator
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # API key template
 ├── data/                   # Scan results & caches
-├── adapters/               # Per-provider HTTP adapters
-├── agents/                 # AI-powered discovery agents
-├── discovery/              # Provider discovery strategies
-├── plugins/                # Optional plugins (benchmark, export, …)
-├── recipes/                # End-to-end usage recipes
-├── search/                 # Web search integration
-├── tools/                  # CLI entry points
-└── examples/               # Standalone example scripts
+└── tests/                  # Pytest smoke + unit tests
 ```
 
 ## ⚙️ Setup
@@ -265,15 +263,23 @@ see `config.py` for the full mapping.
 
 ## 💻 CLI Reference
 
+All commands run via `python main.py <subcommand>`.
+
 | Command | Description |
 | --- | --- |
-| `python -m tools.scan` | Scan all providers and save results |
-| `python -m tools.scan --tier 1` | Scan only Tier 1 (free) providers |
-| `python -m report_generator` | Regenerate this README from latest data |
-| `python -m discovery` | Run AI-powered provider discovery |
-| `python -m plugins.benchmark` | Benchmark image quality & latency |
-| `python -m plugins.export --format csv` | Export provider data to CSV/JSON |
-| `python -m tools.proxy` | Start the local OpenAI-compatible proxy |
+| `python main.py scan` | Scan all providers and report status + latency |
+| `python main.py scan --tier free --report` | Scan one tier and regenerate this README |
+| `python main.py list --format json` | List providers as table / JSON / CSV |
+| `python main.py report` | Regenerate this README from latest data |
+| `python main.py discover` | Probe candidate hosts for unregistered providers |
+| `python main.py benchmark --tier free` | Rank providers by generation latency |
+| `python main.py models --tier free` | Fetch live `/v1/models` lists |
+| `python main.py export --format csv --output providers.csv` | Export provider data |
+| `python main.py costs --sort price --images-per-month 1000` | Compare per-image pricing |
+| `python main.py compare "a red panda" --providers Pollinations.ai` | Run a prompt across providers |
+| `python main.py generate "a red panda" --output panda.png` | One-shot cascade generation |
+| `python main.py proxy --port 8000` | Start local OpenAI-compatible proxy w/ fallback |
+| `python main.py version` | Print the directory version |
 
 ## 🔗 Sister Project – LLM APIs
 
@@ -293,4 +299,4 @@ This project is licensed under the **MIT License** – see the
 
 Built and maintained by **[TaylorAmarelTech](https://github.com/TaylorAmarelTech)**.
 
-Last generated: 2026-03-08
+Last generated: 2026-05-22

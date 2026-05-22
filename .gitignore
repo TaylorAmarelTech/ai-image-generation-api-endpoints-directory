@@ -21,9 +21,16 @@ env/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
+
+# Compare command output
+compare_output/
+
+# pytest
+.pytest_cache/
 
 # OS
 .DS_Store

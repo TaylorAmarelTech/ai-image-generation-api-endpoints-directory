@@ -13,9 +13,56 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 import httpx
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from providers import Provider, Tier, PROVIDERS, get_providers, get_provider
 from config import load_config
+
+
+_TRANSIENT_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)
+
+
+async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict | None = None,
+    headers: dict | None = None,
+    attempts: int = 3,
+) -> httpx.Response:
+    """POST with exponential backoff on transient errors only (not on HTTP errors)."""
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(attempts),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+        retry=retry_if_exception_type(_TRANSIENT_EXCEPTIONS),
+        reraise=True,
+    ):
+        with attempt:
+            return await client.post(url, json=json, headers=headers)
+    raise RuntimeError("retry loop exited without returning")  # pragma: no cover
+
+
+async def _get_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    attempts: int = 3,
+) -> httpx.Response:
+    """GET with exponential backoff on transient errors only."""
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(attempts),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+        retry=retry_if_exception_type(_TRANSIENT_EXCEPTIONS),
+        reraise=True,
+    ):
+        with attempt:
+            return await client.get(url)
+    raise RuntimeError("retry loop exited without returning")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +105,7 @@ class ImageScanner:
         self._semaphore = asyncio.Semaphore(
             scan_cfg.get("concurrency", 8)
         )
+        self._retry_attempts = max(int(scan_cfg.get("retry_count", 1)) + 1, 1)
 
     # -- async context manager ----------------------------------------------
 
@@ -174,8 +222,9 @@ class ImageScanner:
         headers = self._get_auth_headers(provider)
 
         t0 = time.monotonic()
-        resp = await self._client.post(
-            provider.endpoint, json=payload, headers=headers,
+        resp = await _post_with_retry(
+            self._client, provider.endpoint,
+            json=payload, headers=headers, attempts=self._retry_attempts,
         )
         latency = (time.monotonic() - t0) * 1000
 
@@ -220,8 +269,9 @@ class ImageScanner:
         headers = self._get_auth_headers(provider)
 
         t0 = time.monotonic()
-        resp = await self._client.post(
-            endpoint, json=payload, headers=headers,
+        resp = await _post_with_retry(
+            self._client, endpoint,
+            json=payload, headers=headers, attempts=self._retry_attempts,
         )
         latency = (time.monotonic() - t0) * 1000
 
@@ -259,7 +309,7 @@ class ImageScanner:
             url = f"{endpoint}/{encoded_prompt}"
 
         t0 = time.monotonic()
-        resp = await self._client.get(url)
+        resp = await _get_with_retry(self._client, url, attempts=self._retry_attempts)
         latency = (time.monotonic() - t0) * 1000
 
         if resp.status_code != 200:
@@ -301,8 +351,9 @@ class ImageScanner:
         headers = self._get_auth_headers(provider)
 
         t0 = time.monotonic()
-        resp = await self._client.post(
-            provider.endpoint, json=payload, headers=headers,
+        resp = await _post_with_retry(
+            self._client, provider.endpoint,
+            json=payload, headers=headers, attempts=self._retry_attempts,
         )
         latency = (time.monotonic() - t0) * 1000
 

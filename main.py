@@ -20,10 +20,19 @@ from rich.console import Console
 from rich.table import Table
 
 from providers import Tier, PROVIDERS, get_providers, get_provider
-from scanner import run_scan, ScanResult
+from scanner import run_scan, ScanResult, ImageScanner
 from config import load_config
 from report_generator import generate_report
 from __version__ import __version__
+from pricing import (
+    PRICING,
+    all_pricing_sorted,
+    estimate_monthly_cost,
+    get_pricing,
+)
+from model_listing import fetch_all_models
+from discovery import run_discovery
+import proxy as proxy_module
 
 console = Console()
 
@@ -159,18 +168,119 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_discover(args: argparse.Namespace) -> None:
-    """AI-powered discovery of new providers (placeholder)."""
-    console.print("[yellow]Discovery engine coming soon[/yellow]")
+    """Probe well-known candidate hosts for unregistered providers."""
+    console.print("\n[bold cyan]Discovering candidate providers...[/bold cyan]\n")
+    results = asyncio.run(run_discovery(timeout=args.timeout))
+
+    table = Table(title="Discovery Probe Results", show_lines=True)
+    table.add_column("Host", style="bold")
+    table.add_column("URL", overflow="fold")
+    table.add_column("Status", justify="center")
+    table.add_column("HTTP", justify="right")
+    table.add_column("Notes")
+
+    likely = 0
+    for r in results:
+        if r.looks_like_images_api:
+            status = "[green]likely[/green]"
+            likely += 1
+        elif r.reachable:
+            status = "[yellow]reachable[/yellow]"
+        else:
+            status = "[dim red]unreachable[/dim red]"
+        http_code = str(r.status_code) if r.status_code is not None else "-"
+        notes_parts = []
+        if r.auth_required:
+            notes_parts.append("auth required")
+        if r.detail:
+            notes_parts.append(r.detail)
+        if r.candidate.notes:
+            notes_parts.append(r.candidate.notes)
+        table.add_row(r.candidate.host, r.candidate.url, status, http_code, "; ".join(notes_parts))
+
+    console.print(table)
+    console.print(
+        f"\n[bold]{likely}[/bold] candidate(s) look like real image APIs "
+        f"out of [bold]{len(results)}[/bold] probed.\n"
+    )
 
 
 def cmd_benchmark(args: argparse.Namespace) -> None:
-    """Measure generation speed (placeholder)."""
-    console.print("[yellow]Benchmark plugin coming soon[/yellow]")
+    """Measure generation latency across providers."""
+    config = load_config()
+    tier = Tier(args.tier) if args.tier else None
+
+    console.print("\n[bold cyan]Benchmarking image endpoints...[/bold cyan]")
+    console.print(f"[dim]Test prompt: {config['scan'].get('test_prompt')}[/dim]\n")
+
+    results: list[ScanResult] = asyncio.run(run_scan(config, tier=tier))
+    working = [r for r in results if r.status == "working" and r.latency_ms is not None]
+    working.sort(key=lambda r: r.latency_ms or 0.0)
+
+    if not working:
+        console.print("[yellow]No providers responded successfully. Set API keys and retry.[/yellow]")
+        return
+
+    table = Table(title="Latency Benchmark", show_lines=True)
+    table.add_column("Rank", justify="right")
+    table.add_column("Provider", style="bold")
+    table.add_column("Latency", justify="right", style="cyan")
+    table.add_column("Model")
+
+    for i, r in enumerate(working, start=1):
+        table.add_row(
+            str(i),
+            r.provider_name,
+            f"{r.latency_ms:.0f} ms",
+            r.model_used or "-",
+        )
+    console.print(table)
+
+    fastest = working[0]
+    slowest = working[-1]
+    console.print(
+        f"\n[bold]Fastest:[/bold] {fastest.provider_name} ({fastest.latency_ms:.0f} ms)"
+        f"   [bold]Slowest:[/bold] {slowest.provider_name} ({slowest.latency_ms:.0f} ms)\n"
+    )
 
 
 def cmd_models(args: argparse.Namespace) -> None:
-    """Fetch available model lists (placeholder)."""
-    console.print("[yellow]Model listing coming soon[/yellow]")
+    """Fetch live model lists from OpenAI-compatible providers."""
+    tier = Tier(args.tier) if args.tier else None
+    provider_filter = get_providers(tier=tier) if tier else None
+
+    console.print("\n[bold cyan]Fetching model lists...[/bold cyan]\n")
+    listings = asyncio.run(fetch_all_models(providers=provider_filter))
+
+    table = Table(title="Models by Provider", show_lines=True)
+    table.add_column("Provider", style="bold")
+    table.add_column("Source", justify="center")
+    table.add_column("Count", justify="right")
+    table.add_column("Models", overflow="fold")
+
+    source_styles = {
+        "live": "[green]live[/green]",
+        "static": "[dim]static[/dim]",
+        "auth_missing": "[blue]auth missing[/blue]",
+        "error": "[red]error[/red]",
+    }
+
+    for listing in listings:
+        models_str = ", ".join(listing.models[:5])
+        if len(listing.models) > 5:
+            models_str += f" +{len(listing.models) - 5} more"
+        table.add_row(
+            listing.provider_name,
+            source_styles.get(listing.source, listing.source),
+            str(len(listing.models)),
+            models_str or "-",
+        )
+
+    console.print(table)
+    live = sum(1 for l in listings if l.source == "live")
+    console.print(
+        f"\n[bold]{live}[/bold] / [bold]{len(listings)}[/bold] providers returned a live model list.\n"
+    )
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -239,16 +349,108 @@ def cmd_export(args: argparse.Namespace) -> None:
 
 
 def cmd_compare(args: argparse.Namespace) -> None:
-    """Compare outputs across providers (placeholder)."""
-    console.print(f"[yellow]Compare plugin coming soon[/yellow]")
-    console.print(f"[dim]Prompt: {args.prompt}[/dim]")
+    """Generate the same prompt across multiple providers in parallel."""
+    prompt = args.prompt
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.providers:
-        console.print(f"[dim]Providers: {', '.join(args.providers)}[/dim]")
+        targets = []
+        for name in args.providers:
+            p = get_provider(name)
+            if p is None:
+                console.print(f"[yellow]Unknown provider, skipping: {name}[/yellow]")
+                continue
+            targets.append(p)
+    else:
+        # Default: every usable free or auth-free OpenAI-compatible / URL provider.
+        targets = [
+            p for p in PROVIDERS
+            if (p.auth_style in ("none", "url"))
+            or (p.openai_compatible and p.env_key and os.environ.get(p.env_key))
+        ]
+
+    if not targets:
+        console.print("[red]No usable providers selected. Set API keys or pass --providers.[/red]")
+        sys.exit(1)
+
+    console.print(f"\n[bold cyan]Comparing {len(targets)} providers[/bold cyan]")
+    console.print(f"[dim]Prompt: {prompt}[/dim]")
+    console.print(f"[dim]Output: {output_dir}[/dim]\n")
+
+    table = Table(title="Comparison Results", show_lines=True)
+    table.add_column("Provider", style="bold")
+    table.add_column("Status", justify="center")
+    table.add_column("Latency", justify="right")
+    table.add_column("Output")
+
+    safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt)[:40]
+
+    for provider in targets:
+        out_path = output_dir / f"{provider.name.replace(' ', '_').replace('/', '-')}_{safe_prompt}.png"
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            headers = {"Content-Type": "application/json"}
+            if provider.auth_style == "bearer" and provider.env_key:
+                key = os.environ.get(provider.env_key, "")
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+            elif provider.auth_style == "x-api-key" and provider.env_key:
+                key = os.environ.get(provider.env_key, "")
+                if key:
+                    headers["x-api-key"] = key
+
+            if provider.openai_compatible:
+                _generate_openai_compatible(provider, prompt, args.size, headers, str(out_path))
+            elif provider.auth_style in ("none", "url") and "{prompt}" in provider.endpoint:
+                _generate_url_based(provider, prompt, str(out_path))
+            else:
+                _generate_rest(provider, prompt, args.size, headers, str(out_path))
+            latency = (_time.monotonic() - t0) * 1000
+            status = "[green]ok[/green]" if out_path.exists() else "[yellow]partial[/yellow]"
+            table.add_row(provider.name, status, f"{latency:.0f} ms", str(out_path) if out_path.exists() else "-")
+        except SystemExit:
+            latency = (_time.monotonic() - t0) * 1000
+            table.add_row(provider.name, "[red]fail[/red]", f"{latency:.0f} ms", "-")
+        except Exception as exc:
+            latency = (_time.monotonic() - t0) * 1000
+            table.add_row(provider.name, "[red]error[/red]", f"{latency:.0f} ms", str(exc)[:50])
+
+    console.print(table)
 
 
 def cmd_costs(args: argparse.Namespace) -> None:
-    """Compare pricing per image (placeholder)."""
-    console.print("[yellow]Cost comparison coming soon[/yellow]")
+    """Compare per-image pricing across providers."""
+    sort_by = "free_images_per_month" if args.sort == "free" else "usd_per_image"
+    entries = all_pricing_sorted(by=sort_by, include_unknown=True)
+
+    table = Table(title="Per-Image Pricing (USD)", show_lines=False)
+    table.add_column("Provider", style="bold")
+    table.add_column("USD/image", justify="right", style="cyan")
+    table.add_column("Per 1K", justify="right")
+    table.add_column("Free / mo", justify="right", style="green")
+    table.add_column("Notes")
+
+    if args.images_per_month:
+        table.add_column(f"Est. ${args.images_per_month}/mo", justify="right", style="magenta")
+
+    for p in entries:
+        usd_cell = f"${p.usd_per_image:.4f}" if p.usd_per_image >= 0 else "[dim]n/a[/dim]"
+        per_1k = f"${p.cost_per_1000:.2f}" if p.usd_per_image >= 0 else "[dim]n/a[/dim]"
+        free_cell = "unlimited" if p.free_images_per_month == -1 else (
+            str(p.free_images_per_month) if p.free_images_per_month > 0 else "-"
+        )
+        row = [p.provider_name, usd_cell, per_1k, free_cell, p.notes]
+        if args.images_per_month:
+            est = estimate_monthly_cost(p.provider_name, args.images_per_month)
+            row.append(f"${est:.2f}" if est is not None else "[dim]n/a[/dim]")
+        table.add_row(*row)
+
+    console.print(table)
+    console.print(
+        f"\n[dim]Sorted by {sort_by}. Prices are approximate; check provider docs for current rates.[/dim]\n"
+    )
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -463,9 +665,8 @@ def _generate_rest(provider, prompt: str, size: str, headers: dict, output_path:
 
 
 def cmd_proxy(args: argparse.Namespace) -> None:
-    """Start a local OpenAI-compatible proxy (placeholder)."""
-    port = args.port
-    console.print(f"[yellow]Proxy server coming soon (port {port})[/yellow]")
+    """Start a local OpenAI-compatible image-generation proxy with fallback."""
+    proxy_module.serve(port=args.port, host=args.host)
 
 
 def cmd_version(args: argparse.Namespace) -> None:
@@ -529,13 +730,31 @@ def main() -> None:
     )
 
     # 4. discover
-    subparsers.add_parser("discover", help="AI-powered discovery of new providers")
+    sp_discover = subparsers.add_parser(
+        "discover", help="Probe well-known candidate hosts for new providers",
+    )
+    sp_discover.add_argument(
+        "--timeout", type=float, default=8.0,
+        help="Per-probe timeout in seconds (default: 8.0)",
+    )
 
     # 5. benchmark
-    subparsers.add_parser("benchmark", help="Measure generation speed")
+    sp_benchmark = subparsers.add_parser(
+        "benchmark", help="Measure generation latency across providers",
+    )
+    sp_benchmark.add_argument(
+        "--tier", choices=[t.value for t in Tier], default=None,
+        help="Restrict benchmark to a single tier",
+    )
 
     # 6. models
-    subparsers.add_parser("models", help="Fetch available model lists")
+    sp_models = subparsers.add_parser(
+        "models", help="Fetch live model lists (with static fallback)",
+    )
+    sp_models.add_argument(
+        "--tier", choices=[t.value for t in Tier], default=None,
+        help="Restrict to a single tier",
+    )
 
     # 7. export
     sp_export = subparsers.add_parser("export", help="Export provider data")
@@ -555,14 +774,28 @@ def main() -> None:
     sp_compare = subparsers.add_parser("compare", help="Compare outputs across providers")
     sp_compare.add_argument("prompt", help="The prompt to compare")
     sp_compare.add_argument(
-        "--providers",
-        nargs="+",
-        default=None,
-        help="List of provider names to compare",
+        "--providers", nargs="+", default=None,
+        help="List of provider names to compare (default: usable free providers)",
+    )
+    sp_compare.add_argument(
+        "--output-dir", default="compare_output",
+        help="Directory for generated images (default: compare_output/)",
+    )
+    sp_compare.add_argument(
+        "--size", default="1024x1024",
+        help="Image size for providers that accept one (default: 1024x1024)",
     )
 
     # 9. costs
-    subparsers.add_parser("costs", help="Compare pricing per image")
+    sp_costs = subparsers.add_parser("costs", help="Compare per-image pricing")
+    sp_costs.add_argument(
+        "--sort", choices=["price", "free"], default="price",
+        help="Sort by per-image price or by free monthly allotment",
+    )
+    sp_costs.add_argument(
+        "--images-per-month", type=int, default=0,
+        help="If > 0, estimate monthly spend at this volume",
+    )
 
     # 10. generate
     sp_generate = subparsers.add_parser("generate", help="Quick generate via cascade")
@@ -584,12 +817,14 @@ def main() -> None:
     )
 
     # 11. proxy
-    sp_proxy = subparsers.add_parser("proxy", help="Local OpenAI-compatible proxy")
+    sp_proxy = subparsers.add_parser("proxy", help="Local OpenAI-compatible proxy with fallback")
     sp_proxy.add_argument(
-        "--port",
-        type=int,
-        default=8000,
+        "--port", type=int, default=8000,
         help="Port number (default: 8000)",
+    )
+    sp_proxy.add_argument(
+        "--host", default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1; use 0.0.0.0 for LAN access)",
     )
 
     # 12. version
